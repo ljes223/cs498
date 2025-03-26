@@ -1,0 +1,224 @@
+import tkinter as tk
+from PIL import Image, ImageTk, ImageDraw
+import os
+
+class ImageColoringApp:
+    def __init__(self, root, image_path):
+        self.root = root
+        self.root.title("Image Coloring Page")
+        
+        # Canvas setup
+        self.canvas_width = 600
+        self.canvas_height = 600
+        self.canvas = tk.Canvas(root, width=self.canvas_width, height=self.canvas_height, bg='white')
+        self.canvas.pack(pady=10)
+        
+        # Current image state
+        self.image_path = image_path
+        self.original_image = None
+        self.current_image = None
+        self.tk_image = None
+        self.mask_image = None  # Will store a mask of protected pixels
+        
+        # Drawing state
+        self.colors = ['red', 'blue', 'green', 'yellow', 'purple']
+        self.current_color = self.colors[0]
+        self.drawing = False
+        
+        # Load and prepare the image
+        self.load_image()
+        
+        # Create buttons
+        self.create_buttons()
+        
+        # Mouse event bindings
+        self.canvas.bind('<Button-1>', self.start_draw)
+        self.canvas.bind('<B1-Motion>', self.draw)
+        self.canvas.bind('<ButtonRelease-1>', self.stop_draw)
+    
+    def load_image(self):
+        try:
+            # Open the image
+            image = Image.open(self.image_path)
+            
+            # Resize image to fit canvas while maintaining aspect ratio
+            image.thumbnail((self.canvas_width, self.canvas_height), Image.LANCZOS)
+            
+            # Create a white background and paste the image
+            background = Image.new('RGB', (self.canvas_width, self.canvas_height), color='white')
+            # Calculate position to center the image
+            x_offset = (self.canvas_width - image.width) // 2
+            y_offset = (self.canvas_height - image.height) // 2
+            background.paste(image, (x_offset, y_offset))
+            
+            # Create a mask image to track which pixels are protected
+            self.mask_image = Image.new('1', (self.canvas_width, self.canvas_height), 0)
+            mask_draw = ImageDraw.Draw(self.mask_image)
+            
+            # Mark protected pixels (black or very dark pixels)
+            for x in range(background.width):
+                for y in range(background.height):
+                    pixel = background.getpixel((x, y))
+                    # Consider a pixel protected if it's very dark (close to black)
+                    if isinstance(pixel, int):
+                        is_dark = pixel < 50
+                    else:
+                        is_dark = all(p < 50 for p in pixel[:3])
+                    
+                    if is_dark:
+                        mask_draw.point((x, y), fill=1)
+            
+            # Convert to PhotoImage
+            self.tk_image = ImageTk.PhotoImage(background)
+            
+            # Clear previous image and draw new one
+            self.canvas.delete('all')
+            self.canvas.create_image(0, 0, image=self.tk_image, anchor=tk.NW)
+            
+            # Store the image for reset functionality
+            self.original_image = background
+            self.current_image = background.copy()
+            
+        except FileNotFoundError:
+            tk.messagebox.showerror("Error", f"Image file not found: {self.image_path}")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Could not open image: {str(e)}")
+    
+    def create_buttons(self):
+        button_frame = tk.Frame(self.root)
+        button_frame.pack(pady=10)
+        
+        # Color buttons
+        for color in self.colors:
+            btn = tk.Button(button_frame, text=color.capitalize(), 
+                            bg=color, 
+                            command=lambda c=color: self.select_color(c))
+            btn.pack(side=tk.LEFT, padx=5)
+        
+        # Erase and Reset buttons
+        erase_btn = tk.Button(button_frame, text='Erase', command=self.erase_mode)
+        erase_btn.pack(side=tk.LEFT, padx=5)
+        
+        reset_btn = tk.Button(button_frame, text='Reset', command=self.reset_page)
+        reset_btn.pack(side=tk.LEFT, padx=5)
+    
+    def start_draw(self, event):
+        if self.original_image is None:
+            return
+        
+        self.drawing = True
+        self.last_x = event.x
+        self.last_y = event.y
+    
+    def draw(self, event):
+        if not self.drawing or self.original_image is None:
+            return
+        
+        # Check if the drawing would violate protected pixels
+        can_draw = self._check_draw_permission(self.last_x, self.last_y, event.x, event.y)
+        
+        if can_draw:
+            # Convert current image to RGB mode for drawing
+            draw_image = self.current_image.copy()
+            
+            # Create drawing context
+            draw = ImageDraw.Draw(draw_image)
+            
+            # Determine color
+            color = 'white' if self.current_color == 'erase' else self.current_color
+            
+            # Draw line
+            draw.line(
+                [(self.last_x, self.last_y), (event.x, event.y)], 
+                fill=color, 
+                width=5
+            )
+            
+            # Update current image
+            self.current_image = draw_image
+            
+            # Convert and display
+            self.tk_image = ImageTk.PhotoImage(draw_image)
+            self.canvas.delete('all')
+            self.canvas.create_image(0, 0, image=self.tk_image, anchor=tk.NW)
+        
+        # Update last position
+        self.last_x = event.x
+        self.last_y = event.y
+    
+    def _check_draw_permission(self, x1, y1, x2, y2):
+        """
+        Check if the proposed drawing line would violate any protected pixels.
+        Uses Bresenham's line algorithm to check intermediate points.
+        """
+        # Bresenham's line algorithm
+        points = self._get_line_points(x1, y1, x2, y2)
+        
+        for x, y in points:
+            # Check if point is within image bounds
+            if 0 <= x < self.canvas_width and 0 <= y < self.canvas_height:
+                # If any point in the line is a protected pixel, disallow drawing
+                if self.mask_image.getpixel((x, y)) == 1:
+                    return False
+        return True
+    
+    def _get_line_points(self, x1, y1, x2, y2):
+        """
+        Generate points along a line using Bresenham's line algorithm.
+        """
+        points = []
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        x, y = x1, y1
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        
+        if dx > dy:
+            err = dx / 2.0
+            while x != x2:
+                points.append((x, y))
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                x += sx
+        else:
+            err = dy / 2.0
+            while y != y2:
+                points.append((x, y))
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                y += sy
+        
+        points.append((x2, y2))
+        return points
+    
+    def stop_draw(self, event):
+        self.drawing = False
+    
+    def select_color(self, color):
+        self.current_color = color
+    
+    def erase_mode(self):
+        self.current_color = 'erase'
+    
+    def reset_page(self):
+        if self.original_image:
+            # Restore to original uploaded image
+            self.current_image = self.original_image.copy()
+            self.tk_image = ImageTk.PhotoImage(self.current_image)
+            self.canvas.delete('all')
+            self.canvas.create_image(0, 0, image=self.tk_image, anchor=tk.NW)
+
+def main():
+    root = tk.Tk()
+    
+    image_path = 'coloringPageTurtle.jpg' 
+    
+    app = ImageColoringApp(root, image_path)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
